@@ -17,5 +17,3 @@ int main()
   hello();
   dlclose(handle);
 }
-
-
