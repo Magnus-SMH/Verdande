@@ -11,17 +11,36 @@ A Tour of C++           [x] (little of value, unless you like iterators)
 Data-Oriented Design    [ ]
 Real-Time Rendering     [ ]
 
+wayland-book            [ ]
+
+# TODO:
+// have a dynamic checklist for both readinglist and engine features at the top.
+// The engine checklist would change overtime. Treating it as longterm plan list, that isnt fixed in place and changed frequently.
+// or just a list of Achievements from the devlog, that links to that devlog where it was achieved, with a explination.
+
 ## Devlog_1: Intro
 09.06.2026
 
 #### Initial Plans:
 Audio:
-    - PipeWire
+    the audio side of the linux kernel seems flawed
+    and build around abstractions fighting eachother.
+    Options:
+    - 1: ALSA directly hopefully, i would have to disable pipewire,
+         grab the ALSA lock and mix the audio.
+    - 2: Support bluetooth audio only, using BlueZ, make/maintain/reconnect a connection,
+         compress the mixed audio and send it as packages.
+    This would require the engine to own the bluetooth connection to that audio device.
+    Leaning on option 2, as i personally use bluetooth headset,
+    and i/the user wouldnt have to disconnect and disable pipewire to free up ANSI each
+    time to have audio, only need to disconnect the bluetooth headset.
+    Its a bit out of my depth but seems like a fun challange,
+    so i will give it a real shot, but leave it to a later date if i hit a wall.
 Window:
     - Wayland Protocol(libwayland)
 Engine:
     - Hot reload-able
-    - Shared Object (Lib x API mixture)
+    - Shared Object (Lib x API mixture, not sure yet)
     - Unity Build
     - Script to build and run
     - Memory manager
@@ -30,8 +49,11 @@ Engine:
     - Performance Profiler in the editor
     - GLTF Asset prebaker
     - ECS
-    - Starting with Opengl, then Vulkan
+    - Starting with cpu rendering or Opengl, then Vulkan
+Misc:
+    - stb_truetype for texture bitmapping for the early period of development to render text.
 
+# TODO: A bit ranty and disorginised, rewrite.
 Starting work on a handmade game engine, written in c++, but in c style,
 and avoiding c++'s Standard library and alot of the main features, such as classes.
     I am switching from modern c++ to c style to remove alot of abstractions and complexity that modern
