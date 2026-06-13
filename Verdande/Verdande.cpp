@@ -1,14 +1,13 @@
-#include<stdio.h>
-#include<stdlib.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-extern "C" void hello()
-{
+extern "C" void hello_() {
     printf("Hello from Verdande\n");
 }
 
-extern "C" int get_int()
-{
-    int int_var = 9;
+extern "C" int get_int_() {
+    int int_var = 10;
     return int_var;
 }
+
 
