@@ -6,13 +6,13 @@
 
 #include <sys/mman.h>
 #include <dlfcn.h>
-#include <stdio.h>
 #include <poll.h>
-#include <sys/stat.h>
+#include <sys/inotify.h>
 #include <unistd.h>
 #include <string.h>
 
-
+//strace -c -w ./build/appverdande
+//perf stat ./build/appverdande
 //8.3 & 8.4 Damaging and opaque surface
 
 /* Wayland code */
@@ -30,23 +30,20 @@ struct client_state {
     struct xdg_toplevel     *xdg_toplevel;
     
     int width, height;
-
     int32_t shm_fd;
     size_t pool_size;
     uint8_t *pool_data;
     
-    uint32_t frame_index;
+    bool frame_index;
     bool frame_ready;
     bool closed;
     draw_fn dr;
-    bool configured = false;
+    bool configured;
 
     void *handle;
-
 };
 
 //TODO: Remove shm_file, buffers, pool, frame_ready, frame_index when gpu rendering
-
 static int allocate_shm_file(size_t size) {
     int fd = memfd_create("wayland-shm", MFD_CLOEXEC);
     if (fd < 0) return -1;
@@ -78,7 +75,7 @@ static wl_buffer *draw_frame(client_state *state, size_t frame_size_MAX) {
             state->width, state->height, state->width * 4, WL_SHM_FORMAT_XRGB8888);
 
     wl_buffer_add_listener(buffer, &wl_buffer_listener, NULL);
-
+ 
     state->frame_index = !state->frame_index;
     return buffer;
 }
@@ -174,16 +171,16 @@ static const xdg_toplevel_listener xdg_toplevel_listener = {
     .wm_capabilities = NULL,
 };
 
-struct Static_Arena {
+struct Arena {
     uint8_t *base;
     size_t size;
     size_t offset;
 };
 
-bool arena_init(Static_Arena *arena, size_t size) {
+bool arena_init(Arena *arena, size_t size) {
     void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE| MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
-        printf("Failed mmap init");
+        //TODO: Log MAP_Failed
         return false;
     }
     arena->base = static_cast<uint8_t*>(ptr);
@@ -192,7 +189,7 @@ bool arena_init(Static_Arena *arena, size_t size) {
     return true;
 }
 
-void* arena_alloc(Static_Arena *arena, size_t size) {
+void* arena_alloc(Arena *arena, size_t size) {
     if (arena->offset + size > arena->size) {
         return nullptr;
     }
@@ -201,31 +198,45 @@ void* arena_alloc(Static_Arena *arena, size_t size) {
     return ptr;
 }
 
-void arena_destroy(Static_Arena *arena) {
+void arena_reset(Arena *arena) {
+    arena->offset = 0;
+}
+
+void arena_destroy(Arena *arena) {
     if (arena->base && arena->base != MAP_FAILED) {
         munmap(arena->base, arena->size);
     }
 }
 
-
 int main(){
     
-    Static_Arena arena = {};
-    if (!arena_init(&arena, 64ULL*1024ULL*1024ULL)) {
+    Arena static_arena = {};
+    if (!arena_init(&static_arena, 64ULL*1024ULL*1024ULL)) {
         return 1;
     }
 
     void* handle = dlopen(SO_PATH, RTLD_NOW);
-
     if (handle == nullptr){
-        printf("Failed: %s\n", dlerror());
+        //TODO: Log dlerror failed .so connection
         return 1;
     }
     
     draw_fn draw = reinterpret_cast<draw_fn>(dlsym(handle, "draw"));
     if (draw == nullptr){
-        printf("Failed to load api %s\n", dlerror());
+        //TODO: Log dlerror
         dlclose(handle);
+        return 1;
+    }
+
+    int in_fd = inotify_init();
+    if (in_fd < 0) {
+        //TODO: log initofy error
+        return 1;
+    }
+
+    int wd = inotify_add_watch(in_fd, "./build", IN_MOVED_TO);
+    if (wd < 0) {
+        //TODO: Log watch descriptor failed
         return 1;
     }
     
@@ -243,7 +254,7 @@ int main(){
     state.pool_data = static_cast<uint8_t*>(mmap(NULL, state.pool_size , PROT_READ | PROT_WRITE, MAP_SHARED, state.shm_fd, 0));
     
     if (!(state.wl_display = wl_display_connect(nullptr))) {
-        printf("Connection not established\n");
+        //TODO:Log no wl_display connection
         return 1;
     }
 
@@ -253,14 +264,11 @@ int main(){
     wl_display_roundtrip(state.wl_display);
 
     if (!state.wl_compositor || !state.wl_shm || !state.xdg_wm_base) {
-         printf("Some required globals unavailable\n");
-         return 1;
+        //TODO: Log missing globals
+        return 1;
     }
-    
-    //TODO: change to inotify and use with poll
-    struct stat so_file_info;
-    time_t prev_so_time = 0;
-
+   
+    //-------- pre main loop roundtrip --------
     state.wl_shm_pool = wl_shm_create_pool(state.wl_shm, state.shm_fd, static_cast<int32_t>(state.pool_size));
     
     state.wl_surface = wl_compositor_create_surface(state.wl_compositor);
@@ -284,11 +292,16 @@ int main(){
         wl_surface_damage_buffer(state.wl_surface, 0, 0, INT32_MAX, INT32_MAX);
         wl_surface_commit(state.wl_surface);
     }
+    //-----------------------------------------
 
-    pollfd fds[1];
+    pollfd fds[2];
     fds[0].fd = wl_display_get_fd(state.wl_display);
     fds[0].events = POLLIN;
+    fds[1].fd = in_fd;
+    fds[1].events = POLLIN;
 
+    size_t in_buffer_size = 8ULL * 1024ULL;
+    uint8_t *in_event_buffer = static_cast<uint8_t*>(arena_alloc(&static_arena, in_buffer_size));
 
     while (!state.closed) {
         while (wl_display_prepare_read(state.wl_display) != 0) {
@@ -298,18 +311,51 @@ int main(){
         wl_display_flush(state.wl_display);
         
         int timeout = state.frame_ready ? 0 : -1;
-        poll(fds,1,timeout);
-
+        poll(fds,2,timeout);
+        
+        //poll wayland events
         if (fds[0].revents & POLLIN) {
             wl_display_read_events(state.wl_display);
         } else {
             wl_display_cancel_read(state.wl_display);
         }
+        
+        //poll inotify events
+        if (fds[1].revents & POLLIN) {
+            size_t len = read(in_fd, in_event_buffer, in_buffer_size);
+            if (len == 0) {
+                //TODO:Log
+                return 1;
+            }
+            size_t i = 0;
+            while (i < len) {
+                struct inotify_event *event = reinterpret_cast<struct inotify_event*>(in_event_buffer + i);
+                if (event->mask & IN_MOVED_TO) {
+                    if (event->len > 0 && strcmp(event->name, "libverdande.so") == 0) {
+                        dlclose(state.handle);
+                        state.handle = nullptr;
+                        state.dr = nullptr;
+
+                        state.handle = dlopen(SO_PATH, RTLD_NOW);
+                        if (state.handle == nullptr) {
+                            return 1;
+                        }
+                        state.dr = reinterpret_cast<draw_fn>(dlsym(state.handle, "draw"));
+                        if (state.dr == nullptr){
+                            dlclose(state.handle);
+                            return 1;
+                        }
+                    }
+                }                
+                i += sizeof(struct inotify_event) + event->len;
+            }
+            
+        }
 
         wl_display_dispatch_pending(state.wl_display);
 
-        if (state.frame_ready) {
-            state.frame_ready = false;
+        if (state.frame_ready) { 
+            state.frame_ready = false;    
 
             wl_buffer *buffer = draw_frame(&state, single_frame_MAX_mem);
             wl_surface_attach(state.wl_surface, buffer, 0, 0);
@@ -318,32 +364,23 @@ int main(){
             cb = wl_surface_frame(state.wl_surface);
             wl_callback_add_listener(cb, &wl_surface_frame_listener, &state);
 
-            wl_surface_commit(state.wl_surface);
-        }
-
-        //TODO: change to inotify?
-        if (stat("build/libverdande.so", &so_file_info) == 0) {
-            if (time_t time = so_file_info.st_mtime; prev_so_time != time) {
-                prev_so_time = time;
-                dlclose(state.handle);
-                state.handle = dlopen(SO_PATH, RTLD_NOW);
-            }
+            wl_surface_commit(state.wl_surface); 
         }
     }
-
 
     int err = wl_display_get_error(state.wl_display);
     if (err != 0) {
-        fprintf(stderr, "Wayland protocol/display error during runtime: %d\n", err);
+        //TODO:Log err msg
+        return 10;
     }
 
     wl_display_disconnect(state.wl_display);
-    
+
     munmap(state.pool_data, state.pool_size);
     close(state.shm_fd);
+    close(in_fd);
     dlclose(state.handle);
-    arena_destroy(&arena);
+    arena_destroy(&static_arena);
 
-    return 0;
-        
+    return 0;    
 }
